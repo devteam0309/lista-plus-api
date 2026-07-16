@@ -1,0 +1,300 @@
+### Lista+ Cloud API — REST client collection
+### VS Code: install "REST Client" (humao.rest-client), then click "Send Request" above each block.
+### JetBrains IDEs run .http files natively.
+###
+### Flow: auth → billing verify (unlock Premium) → push → pull
+
+@host = http://localhost:3000
+@baseUrl = {{host}}/api/v1
+
+# Paste a real Google ID token here. To get one during development, log the token
+# from the Android app's GoogleSignInAccount.idToken, or use the OAuth Playground.
+@googleIdToken = PASTE_A_REAL_GOOGLE_ID_TOKEN
+@purchaseToken = PASTE_A_PLAY_PURCHASE_TOKEN
+
+# Stable UUIDs so the push/pull examples below reference each other.
+@customerGlobalId = 3f1a1b3e-6a5e-4e0e-9a1a-2c4a6f7b8c90
+@productGlobalId = 8a2b4c6d-1e3f-4a5b-8c9d-0e1f2a3b4c5d
+@transactionGlobalId = 5d4c3b2a-9f8e-4d7c-6b5a-4f3e2d1c0b9a
+@paymentGlobalId = 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e
+
+###############################################################################
+# Health
+###############################################################################
+
+### Liveness / readiness — no auth
+GET {{baseUrl}}/health
+
+###############################################################################
+# 1. Auth — exchange a Google ID token for an API token
+###############################################################################
+
+### Sign in. The @token variable below is captured from this response.
+# @name signIn
+POST {{baseUrl}}/auth/google
+Content-Type: application/json
+
+{
+  "idToken": "{{googleIdToken}}"
+}
+
+### Captured from the sign-in response — every request below uses it.
+@token = {{signIn.response.body.token}}
+
+### Who am I (handy for checking premium status)
+GET {{baseUrl}}/auth/me
+Authorization: Bearer {{token}}
+
+### Logout (stateless — the client just discards the token)
+POST {{baseUrl}}/auth/logout
+Authorization: Bearer {{token}}
+
+### Invalid token → 401
+POST {{baseUrl}}/auth/google
+Content-Type: application/json
+
+{
+  "idToken": "obviously-not-a-real-token"
+}
+
+###############################################################################
+# 2. Billing — unlock Premium (sync is Premium-only)
+###############################################################################
+
+### Verify the Play purchase. Until this succeeds, sync returns 403 PREMIUM_REQUIRED.
+POST {{baseUrl}}/billing/verify
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "productId": "listaplus_premium_lifetime",
+  "purchaseToken": "{{purchaseToken}}"
+}
+
+###############################################################################
+# 3. Push — upload local changes
+###############################################################################
+
+### Push one of each entity type. Note every FK is a globalId, never a Room int.
+POST {{baseUrl}}/sync/push
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "changes": [
+    {
+      "entityType": "customer",
+      "globalId": "{{customerGlobalId}}",
+      "updatedAt": 1736899200000,
+      "deleted": false,
+      "payload": {
+        "fullName": "Aling Nena Santos",
+        "nickname": "Nena",
+        "phone": "09171234567",
+        "address": "Purok 3, Barangay Mabini",
+        "creditLimit": 1500,
+        "notes": "Suki since 2019",
+        "isActive": true
+      }
+    },
+    {
+      "entityType": "product",
+      "globalId": "{{productGlobalId}}",
+      "updatedAt": 1736899200000,
+      "deleted": false,
+      "payload": {
+        "name": "Kopiko Black 3in1",
+        "category": "Coffee",
+        "unit": "sachet",
+        "price": 12,
+        "isActive": true
+      }
+    },
+    {
+      "entityType": "transaction",
+      "globalId": "{{transactionGlobalId}}",
+      "updatedAt": 1736899200000,
+      "deleted": false,
+      "payload": {
+        "customerGlobalId": "{{customerGlobalId}}",
+        "transactionDate": 1736899200000,
+        "totalAmount": 36,
+        "amountPaid": 0,
+        "status": "unpaid",
+        "notes": "Umaga"
+      }
+    },
+    {
+      "entityType": "transaction_item",
+      "globalId": "7c8d9e0f-1a2b-4c3d-8e5f-6a7b8c9d0e1f",
+      "updatedAt": 1736899200000,
+      "deleted": false,
+      "payload": {
+        "transactionGlobalId": "{{transactionGlobalId}}",
+        "productGlobalId": "{{productGlobalId}}",
+        "productName": "Kopiko Black 3in1",
+        "quantity": 3,
+        "unit": "sachet",
+        "unitPrice": 12,
+        "lineTotal": 36
+      }
+    },
+    {
+      "entityType": "payment",
+      "globalId": "{{paymentGlobalId}}",
+      "updatedAt": 1736899300000,
+      "deleted": false,
+      "payload": {
+        "customerGlobalId": "{{customerGlobalId}}",
+        "amount": 20,
+        "paymentDate": 1736899300000,
+        "notes": "Bayad partial"
+      }
+    },
+    {
+      "entityType": "payment_allocation",
+      "globalId": "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e",
+      "updatedAt": 1736899300000,
+      "deleted": false,
+      "payload": {
+        "paymentGlobalId": "{{paymentGlobalId}}",
+        "transactionGlobalId": "{{transactionGlobalId}}",
+        "amount": 20
+      }
+    },
+    {
+      "entityType": "activity_log",
+      "globalId": "9e0f1a2b-3c4d-4e5f-8a7b-6c5d4e3f2a1b",
+      "updatedAt": 1736899300000,
+      "deleted": false,
+      "payload": {
+        "type": "payment_received",
+        "subject": "Aling Nena Santos",
+        "amount": 20,
+        "customerGlobalId": "{{customerGlobalId}}",
+        "refGlobalId": "{{paymentGlobalId}}",
+        "timestamp": 1736899300000
+      }
+    }
+  ]
+}
+
+### Conflict demo — OLDER LOSES. Same globalId, lower updatedAt → skipped: 1.
+POST {{baseUrl}}/sync/push
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "changes": [
+    {
+      "entityType": "customer",
+      "globalId": "{{customerGlobalId}}",
+      "updatedAt": 1000000000000,
+      "deleted": false,
+      "payload": {
+        "fullName": "Stale Name That Must Not Win",
+        "nickname": null,
+        "phone": null,
+        "address": null,
+        "creditLimit": 0,
+        "notes": null,
+        "isActive": true
+      }
+    }
+  ]
+}
+
+### Conflict demo — NEWER WINS. Higher updatedAt → applied: 1.
+POST {{baseUrl}}/sync/push
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "changes": [
+    {
+      "entityType": "customer",
+      "globalId": "{{customerGlobalId}}",
+      "updatedAt": 1736999999000,
+      "deleted": false,
+      "payload": {
+        "fullName": "Nena Santos-Cruz",
+        "nickname": "Nena",
+        "phone": "09171234567",
+        "address": "Purok 3, Barangay Mabini",
+        "creditLimit": 2000,
+        "notes": "Credit limit raised",
+        "isActive": true
+      }
+    }
+  ]
+}
+
+### Idempotency demo — re-send any block above verbatim; the replay reports skipped.
+
+### Tombstone — soft-delete propagates to other devices.
+POST {{baseUrl}}/sync/push
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "changes": [
+    {
+      "entityType": "activity_log",
+      "globalId": "9e0f1a2b-3c4d-4e5f-8a7b-6c5d4e3f2a1b",
+      "updatedAt": 1737000000000,
+      "deleted": true,
+      "payload": null
+    }
+  ]
+}
+
+###############################################################################
+# 4. Pull — download remote changes
+###############################################################################
+
+### Full sync (fresh install / restore). Store the returned serverTime locally.
+GET {{baseUrl}}/sync/pull?since=0
+Authorization: Bearer {{token}}
+
+### Delta sync — pass the serverTime from the previous pull.
+GET {{baseUrl}}/sync/pull?since=1736899250000
+Authorization: Bearer {{token}}
+
+### Up to date → { "changes": [] }
+GET {{baseUrl}}/sync/pull?since=9999999999999
+Authorization: Bearer {{token}}
+
+###############################################################################
+# Error cases
+###############################################################################
+
+### No token → 401
+GET {{baseUrl}}/sync/pull?since=0
+
+### Free tier → 403 PREMIUM_REQUIRED (run before billing/verify)
+GET {{baseUrl}}/sync/pull?since=0
+Authorization: Bearer {{token}}
+
+### Local Room int as a foreign key → 400 (guards the UUID migration)
+POST {{baseUrl}}/sync/push
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "changes": [
+    {
+      "entityType": "transaction",
+      "globalId": "{{transactionGlobalId}}",
+      "updatedAt": 1737000000000,
+      "deleted": false,
+      "payload": {
+        "customerGlobalId": "42",
+        "transactionDate": 1736899200000,
+        "totalAmount": 36,
+        "amountPaid": 0,
+        "status": "unpaid",
+        "notes": null
+      }
+    }
+  ]
+}

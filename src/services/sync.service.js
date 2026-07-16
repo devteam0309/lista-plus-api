@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { ENTITY_REGISTRY, ENTITY_TYPES } from '../models/registry.js';
 import { supportsTransactions } from '../config/db.js';
+import { config } from '../config/env.js';
 import { toDecimal, fromDecimal } from '../utils/money.js';
 import { ApiError } from '../utils/ApiError.js';
 import { logger } from '../utils/logger.js';
@@ -86,12 +87,30 @@ export async function pull(userId, since) {
  * ------------------------------------------------------------------ */
 
 /**
+ * A device clock can be wrong by hours; it cannot legitimately be wrong by a
+ * day. Anything past this bound would out-rank every honest edit until it and
+ * be re-delivered on every pull (its updatedAt stays > any real `since`).
+ */
+export const MAX_UPDATED_AT_SKEW_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Validate every change before writing anything, so a malformed batch is
  * rejected whole rather than half-applied.
  * @returns {Array} changes with payloads parsed/normalised
  */
 export function validateChanges(changes) {
-  return changes.map((change, index) => {
+  const maxUpdatedAt = Date.now() + MAX_UPDATED_AT_SKEW_MS;
+  let clamped = 0;
+
+  const validated = changes.map((change, index) => {
+    if (change.updatedAt > maxUpdatedAt) {
+      // Clamp rather than reject: the write still lands, just with a sane
+      // timestamp, so a device with a broken clock degrades instead of
+      // permanently wedging the row.
+      change = { ...change, updatedAt: maxUpdatedAt };
+      clamped += 1;
+    }
+
     const registryEntry = ENTITY_REGISTRY[change.entityType];
 
     if (change.deleted) {
@@ -116,6 +135,12 @@ export function validateChanges(changes) {
 
     return { ...change, payload: parsed.data };
   });
+
+  if (clamped > 0) {
+    logger.warn({ clamped }, 'clamped far-future updatedAt values to serverTime + 24h');
+  }
+
+  return validated;
 }
 
 /**
@@ -160,11 +185,34 @@ async function applyInSession(registryEntry, userId, change, session) {
   return 'applied';
 }
 
+/**
+ * Soft cap: a push is refused only once the account is already AT the limit,
+ * so the true ceiling is limit + one batch. Counting which incoming changes
+ * are inserts vs updates isn't worth the extra queries — below the cap edits
+ * are never blocked, and an abuser overshoots by at most MAX_BATCH_SIZE.
+ */
+async function assertUnderQuota(userId) {
+  const limit = config.syncMaxDocsPerUser;
+  if (!limit) return;
+
+  const counts = await Promise.all(
+    ENTITY_TYPES.map((t) => ENTITY_REGISTRY[t].model.countDocuments({ userId }))
+  );
+  const total = counts.reduce((sum, n) => sum + n, 0);
+
+  if (total >= limit) {
+    logger.warn({ userId: String(userId), total, limit }, 'sync push refused: storage quota');
+    throw new ApiError(403, 'QUOTA_EXCEEDED', 'Account storage limit reached', { total, limit });
+  }
+}
+
 export async function push(userId, rawChanges) {
   const changes = validateChanges(rawChanges);
   const serverTime = Date.now();
 
   if (changes.length === 0) return { serverTime, applied: 0, skipped: 0 };
+
+  await assertUnderQuota(userId);
 
   const useTransaction = await supportsTransactions();
 

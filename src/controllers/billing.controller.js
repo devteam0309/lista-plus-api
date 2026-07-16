@@ -37,19 +37,29 @@ export const verify = asyncHandler(async (req, res) => {
 
   const premiumSince = req.user.premiumSince ?? result.purchaseTimeMillis ?? Date.now();
 
-  const user = await User.findByIdAndUpdate(
-    req.userId,
-    {
-      $set: {
-        premium: true,
-        premiumSince,
-        purchaseToken,
-        purchaseProductId: productId,
-        purchaseOrderId: result.orderId ?? null,
+  let user;
+  try {
+    user = await User.findByIdAndUpdate(
+      req.userId,
+      {
+        $set: {
+          premium: true,
+          premiumSince,
+          purchaseToken,
+          purchaseProductId: productId,
+          purchaseOrderId: result.orderId ?? null,
+        },
       },
-    },
-    { new: true }
-  );
+      { new: true }
+    );
+  } catch (err) {
+    // Loser of a concurrent verify of the same token on another account —
+    // the unique purchaseToken index fired after the exists() check passed.
+    if (err?.code === 11000) {
+      throw new ApiError(409, 'PURCHASE_ALREADY_CLAIMED', 'This purchase is already linked to another account');
+    }
+    throw err;
+  }
 
   logger.info({ userId: String(req.userId), productId }, 'premium unlocked');
 

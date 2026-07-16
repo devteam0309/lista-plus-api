@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
+import { config } from '../src/config/env.js';
 import { Customer } from '../src/models/Customer.js';
+import { MAX_UPDATED_AT_SKEW_MS } from '../src/services/sync.service.js';
 import { createUser, auth, customerChange } from './helpers/factory.js';
 
 const app = createApp();
@@ -191,6 +193,82 @@ describe('POST /api/v1/sync/push — validation', () => {
     const stored = await Customer.findOne({ userId: user._id, globalId });
 
     expect(stored.creditLimit.toString()).toBe('0.1000');
+  });
+
+  it('rejects an absurd money value', async () => {
+    const { token } = await createUser();
+
+    const res = await push(token, [customerChange({ payload: { creditLimit: 1e15 } })]);
+
+    expect(res.status).toBe(400);
+    expect(await Customer.countDocuments()).toBe(0);
+  });
+});
+
+describe('POST /api/v1/sync/push — abuse guards', () => {
+  it('clamps a far-future updatedAt so the row can still be overwritten by honest edits', async () => {
+    const { token, user } = await createUser();
+    const globalId = randomUUID();
+    const farFuture = Date.now() + 365 * 24 * 60 * 60 * 1000;
+
+    const res = await push(token, [customerChange({ globalId, updatedAt: farFuture })]);
+    expect(res.body).toMatchObject({ applied: 1, skipped: 0 });
+
+    const stored = await Customer.findOne({ userId: user._id, globalId });
+    expect(stored.updatedAt).toBeLessThanOrEqual(Date.now() + MAX_UPDATED_AT_SKEW_MS);
+
+    // The point of the clamp: a later honest edit still wins.
+    const honest = await push(token, [
+      customerChange({ globalId, updatedAt: stored.updatedAt + 1, payload: { fullName: 'Recovered' } }),
+    ]);
+    expect(honest.body).toMatchObject({ applied: 1, skipped: 0 });
+  });
+
+  it('leaves an updatedAt within the skew allowance untouched', async () => {
+    const { token, user } = await createUser();
+    const globalId = randomUUID();
+    const slightlyAhead = Date.now() + 60 * 60 * 1000; // 1h fast clock
+
+    await push(token, [customerChange({ globalId, updatedAt: slightlyAhead })]);
+
+    const stored = await Customer.findOne({ userId: user._id, globalId });
+    expect(stored.updatedAt).toBe(slightlyAhead);
+  });
+
+  it('refuses a push once the account is at its document quota', async () => {
+    const { token } = await createUser();
+    const previous = config.syncMaxDocsPerUser;
+    config.syncMaxDocsPerUser = 2;
+
+    try {
+      const ok = await push(token, [customerChange(), customerChange()]);
+      expect(ok.body).toMatchObject({ applied: 2, skipped: 0 });
+
+      const refused = await push(token, [customerChange()]);
+      expect(refused.status).toBe(403);
+      expect(refused.body.error.code).toBe('QUOTA_EXCEEDED');
+      expect(await Customer.countDocuments()).toBe(2);
+    } finally {
+      config.syncMaxDocsPerUser = previous;
+    }
+  });
+
+  it('quota is per user: one full account does not block another', async () => {
+    const { token: fullToken } = await createUser();
+    const { token: freshToken } = await createUser();
+    const previous = config.syncMaxDocsPerUser;
+    config.syncMaxDocsPerUser = 1;
+
+    try {
+      await push(fullToken, [customerChange()]);
+      const refused = await push(fullToken, [customerChange()]);
+      expect(refused.status).toBe(403);
+
+      const fresh = await push(freshToken, [customerChange()]);
+      expect(fresh.body).toMatchObject({ applied: 1, skipped: 0 });
+    } finally {
+      config.syncMaxDocsPerUser = previous;
+    }
   });
 });
 

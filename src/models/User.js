@@ -21,6 +21,14 @@ const userSchema = new Schema(
   { timestamps: true }
 );
 
+// One purchase unlocks one account. The controller checks this before writing,
+// but only this index closes the race between two concurrent verifies of the
+// same token. Partial: most users hold null, which must not collide.
+userSchema.index(
+  { purchaseToken: 1 },
+  { unique: true, partialFilterExpression: { purchaseToken: { $type: 'string' } } }
+);
+
 userSchema.methods.toPublicJSON = function toPublicJSON() {
   return {
     id: this._id.toString(),

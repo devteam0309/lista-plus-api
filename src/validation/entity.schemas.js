@@ -18,9 +18,13 @@ const text = z
   .max(2000)
   .nullish()
   .transform((v) => v ?? null);
+// ±1e12 pesos is beyond any real ledger but well inside Decimal128 and
+// double precision — it exists to bound abuse, not commerce.
 const money = z
   .number()
   .finite()
+  .min(-1_000_000_000_000)
+  .max(1_000_000_000_000)
   .nullish()
   .transform((v) => v ?? null);
 const epochMillis = z

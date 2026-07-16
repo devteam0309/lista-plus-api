@@ -58,7 +58,8 @@ export function issueApiToken(user) {
 
 export function verifyApiToken(token) {
   try {
-    return jwt.verify(token, config.jwtSecret);
+    // Pinned so a token can never downgrade the verification algorithm.
+    return jwt.verify(token, config.jwtSecret, { algorithms: ['HS256'] });
   } catch {
     throw ApiError.unauthorized('Invalid or expired token');
   }

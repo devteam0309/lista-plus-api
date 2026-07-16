@@ -41,6 +41,7 @@ curl http://localhost:3000/api/v1/health
 | `APP_PACKAGE` | no | Default `com.jorres.listaplus`. |
 | `GOOGLE_PLAY_SA_KEY` | for billing | Service-account key: an absolute path to the JSON file, or the raw JSON itself. Needs *View financial data* on the Play Console app. |
 | `CORS_ORIGINS` | no | Comma-separated browser allowlist for the future web dashboard. The Android app is not a browser and is unaffected. |
+| `SYNC_MAX_DOCS_PER_USER` | no | Storage quota per account, summed across entity types. Default `200000`; `0` disables. |
 
 ---
 
@@ -91,6 +92,7 @@ Errors share one envelope:
 | `PREMIUM_REQUIRED` | 403 | Free tier hitting a sync endpoint. |
 | `NOT_FOUND` | 404 | No such route. |
 | `PURCHASE_ALREADY_CLAIMED` | 409 | That purchase token is bound to another account. |
+| `QUOTA_EXCEEDED` | 403 | The account is at its `SYNC_MAX_DOCS_PER_USER` storage quota; pushes are refused until it is raised. |
 | `PAYLOAD_TOO_LARGE` | 413 | Body over 5 MB — split the batch. |
 | `RATE_LIMITED` | 429 | See [Rate limits](#rate-limits). |
 | `BILLING_UNAVAILABLE` | 503 | Server has no Play service-account key configured. |
@@ -233,7 +235,7 @@ Peso amounts are stored as **Decimal128**, not JS floats: a ledger adds and subt
 Worth knowing before this meets real traffic:
 
 - **Pull is unpaginated** by design — the contract has no cursor, and truncating a response would silently corrupt a ledger (the client would advance `since` past data it never received). A store with years of history does one large first sync. If this becomes a problem, add pagination as a *contract change* on both sides, not a server-side cap.
-- **`updatedAt` is the device's clock.** A phone with a badly wrong clock can write a change whose `updatedAt` is in the past and lose to the server copy forever, or one in the future that nothing can overwrite. `serverTime` is sampled *before* the pull query so concurrent writes are re-delivered rather than missed, but that does not fix a skewed device. If this bites, have the client clamp `updatedAt` to `min(localNow, serverTime + ε)`.
+- **`updatedAt` is the device's clock.** A phone with a badly wrong clock can write a change whose `updatedAt` is in the past and lose to the server copy forever. The future direction is bounded server-side: any `updatedAt` more than 24 h ahead of server time is **clamped** to `serverTime + 24h` on push, so a broken clock can no longer produce a row that nothing can ever overwrite. `serverTime` is sampled *before* the pull query so concurrent writes are re-delivered rather than missed. A clamped device's local copy keeps its original (higher) `updatedAt`, so that one device may skip pulled edits until its clock is fixed — the server and all other devices stay consistent.
 - **Conflicts resolve per entity, not per field.** Two devices editing different fields of the same customer means the later write wins wholesale. Fine for one owner with one phone; revisit if multi-staff editing ships.
 
 ---
@@ -244,7 +246,8 @@ Worth knowing before this meets real traffic:
 - Google ID tokens are verified with `audience` pinned to `GOOGLE_CLIENT_ID`.
 - A purchase token is bound to one account; replaying it on a second account is a `409`.
 - `helmet`, a CORS allowlist, and per-route rate limits are on by default. Authorization headers, `idToken`, and `purchaseToken` are redacted from logs.
-- Bodies are capped at 5 MB; batches at 1000 changes.
+- Bodies are capped at 5 MB; batches at 1000 changes; accounts at `SYNC_MAX_DOCS_PER_USER` synced documents (a growth guard — the check is a soft cap enforced at push time).
+- API tokens are verified with the algorithm pinned to HS256.
 - Terminate TLS in front of this service in production (nginx/Render/Fly). `trust proxy` is enabled so `req.ip` reflects the real client.
 
 ### Rate limits
@@ -271,7 +274,7 @@ Sync is keyed by user, not IP, on purpose: a whole neighbourhood can share one N
 npm test
 ```
 
-55 tests over 5 suites, on a real in-memory MongoDB (no mocked Mongoose). Google and Play are mocked at the module boundary.
+5 suites on a real in-memory MongoDB (no mocked Mongoose). Google and Play are mocked at the module boundary.
 
 | Suite | Covers |
 |---|---|

@@ -12,7 +12,7 @@ export const validateBody = (schema) => (req, _res, next) => {
 export const validateQuery = (schema) => (req, _res, next) => {
   const result = schema.safeParse(req.query);
   if (!result.success) return next(result.error);
-  // Express 5 exposes req.query as a getter-only property.
+  // Kept off req.query: Express 5 makes it getter-only, so this stays portable.
   req.validatedQuery = result.data;
   next();
 };

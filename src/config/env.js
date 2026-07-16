@@ -43,4 +43,9 @@ export const config = {
     .split(',')
     .map((o) => o.trim())
     .filter(Boolean),
+
+  // Total synced documents one account may store, summed across entity types.
+  // Growth guard, not a business limit — a real store stays far below it.
+  // 0 disables the check.
+  syncMaxDocsPerUser: Number(process.env.SYNC_MAX_DOCS_PER_USER ?? 200_000),
 };

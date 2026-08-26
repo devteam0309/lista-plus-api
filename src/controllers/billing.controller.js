@@ -1,11 +1,21 @@
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
+import { config } from '../config/env.js';
 import { User } from '../models/User.js';
 import { verifyPurchase, acknowledgePurchase } from '../services/playBilling.service.js';
 import { logger } from '../utils/logger.js';
 
 export const verify = asyncHandler(async (req, res) => {
   const { productId, purchaseToken } = req.body;
+
+  // Only the configured premium SKU(s) may unlock Premium. Without this, any
+  // purchased product in the package — a future consumable, a test SKU —
+  // would grant the lifetime entitlement.
+  if (!config.premiumProductIds.includes(productId)) {
+    return res.status(400).json({
+      error: { code: 'PURCHASE_INVALID', message: 'Not a recognised premium product' },
+    });
+  }
 
   // One purchase unlocks one account. Without this, a single token could be
   // passed around to unlock Premium for everyone.

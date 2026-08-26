@@ -60,26 +60,72 @@ function buildSet(registryEntry, userId, change) {
  * Pull
  * ------------------------------------------------------------------ */
 
-export async function pull(userId, since) {
+/**
+ * Total order over changes: (updatedAt, entityType, globalId). The tiebreakers
+ * make the order deterministic when many rows share one updatedAt (a bulk
+ * migration stamps thousands of rows with the same millisecond), which is what
+ * lets a page cursor resume without skipping or repeating ties.
+ */
+function compareChanges(a, b) {
+  if (a.updatedAt !== b.updatedAt) return a.updatedAt - b.updatedAt;
+  if (a.entityType !== b.entityType) return a.entityType < b.entityType ? -1 : 1;
+  return a.globalId < b.globalId ? -1 : a.globalId > b.globalId ? 1 : 0;
+}
+
+/** Per-entity filter for "after the cursor position" in the order above. */
+function pullFilter(entityType, userId, since, cursor) {
+  const sinceCond = { updatedAt: { $gt: since } };
+  if (!cursor) return { userId, ...sinceCond };
+
+  const { updatedAt, entityType: cursorType, globalId } = cursor;
+  let afterCursor;
+  if (entityType < cursorType) {
+    afterCursor = { updatedAt: { $gt: updatedAt } };
+  } else if (entityType > cursorType) {
+    afterCursor = { updatedAt: { $gte: updatedAt } };
+  } else {
+    afterCursor = {
+      $or: [{ updatedAt: { $gt: updatedAt } }, { updatedAt, globalId: { $gt: globalId } }],
+    };
+  }
+  return { userId, $and: [sinceCond, afterCursor] };
+}
+
+export async function pull(userId, since, cursor = null) {
   // Sampled BEFORE the reads. Anything committed while we are querying keeps an
   // updatedAt greater than this value, so the client's next pull still sees it.
   // (Cost: some changes may be delivered twice — pull is idempotent client-side.)
-  const serverTime = Date.now();
+  // On cursor pages the FIRST page's value is carried through the cursor, so
+  // whichever page the client persists, nothing written mid-cycle is skipped.
+  const serverTime = cursor ? cursor.serverTime : Date.now();
+
+  const limit = config.syncPullMaxChanges;
+  // One extra doc per entity tells us whether anything lies beyond this page.
+  const fetchLimit = limit > 0 ? limit + 1 : 0;
 
   const perEntity = await Promise.all(
     ENTITY_TYPES.map(async (entityType) => {
       const registryEntry = ENTITY_REGISTRY[entityType];
-      const docs = await registryEntry.model
-        .find({ userId, updatedAt: { $gt: since } })
-        .sort({ updatedAt: 1 })
-        .lean();
+      let query = registryEntry.model
+        .find(pullFilter(entityType, userId, since, cursor))
+        .sort({ updatedAt: 1, globalId: 1 });
+      if (fetchLimit > 0) query = query.limit(fetchLimit);
+      const docs = await query.lean();
       return docs.map((doc) => toSyncChange(entityType, registryEntry, doc));
     })
   );
 
-  const changes = perEntity.flat().sort((a, b) => a.updatedAt - b.updatedAt);
+  const merged = perEntity.flat().sort(compareChanges);
 
-  return { serverTime, changes };
+  const hasMore = limit > 0 && merged.length > limit;
+  const changes = hasMore ? merged.slice(0, limit) : merged;
+
+  const result = { serverTime, changes, hasMore };
+  if (hasMore) {
+    const last = changes[changes.length - 1];
+    result.nextCursor = `${serverTime}:${last.updatedAt}:${last.entityType}:${last.globalId}`;
+  }
+  return result;
 }
 
 /* ------------------------------------------------------------------ *

@@ -23,6 +23,7 @@ export function syncPlugin(schema) {
 
   // Idempotent upsert key + per-user isolation.
   schema.index({ userId: 1, globalId: 1 }, { unique: true });
-  // Drives GET /sync/pull?since=
-  schema.index({ userId: 1, updatedAt: 1 });
+  // Drives GET /sync/pull?since= — globalId included so a page cursor can
+  // resume inside a run of identical updatedAt values without a scan.
+  schema.index({ userId: 1, updatedAt: 1, globalId: 1 });
 }

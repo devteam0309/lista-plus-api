@@ -10,3 +10,5 @@ export const authRouter = Router();
 authRouter.post('/google', authLimiter, validateBody(googleAuthBodySchema), authController.googleSignIn);
 authRouter.get('/me', requireAuth, authController.me);
 authRouter.post('/logout', requireAuth, authController.logout);
+// Rate-limited like sign-in: destructive, and a retry storm would hammer Atlas.
+authRouter.delete('/me', authLimiter, requireAuth, authController.deleteMe);

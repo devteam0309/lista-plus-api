@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
+import { config } from '../src/config/env.js';
 import { createUser, auth, customerChange } from './helpers/factory.js';
 
 const app = createApp();
@@ -132,6 +133,130 @@ describe('GET /api/v1/sync/pull — since filtering', () => {
     const res = await pull(token, 0);
 
     expect(res.status).toBe(403);
+  });
+});
+
+describe('GET /api/v1/sync/pull — pagination', () => {
+  const pullPage = (token, since, cursor) =>
+    request(app)
+      .get(`/api/v1/sync/pull?since=${since}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)
+      .set(auth(token));
+
+  /** Follows nextCursor until hasMore is false; returns every page. */
+  async function pullAllPages(token, since) {
+    const pages = [];
+    let cursor;
+    do {
+      const res = await pullPage(token, since, cursor);
+      expect(res.status).toBe(200);
+      pages.push(res.body);
+      cursor = res.body.nextCursor;
+    } while (pages[pages.length - 1].hasMore);
+    return pages;
+  }
+
+  const originalLimit = config.syncPullMaxChanges;
+  afterEach(() => {
+    config.syncPullMaxChanges = originalLimit;
+  });
+
+  it('reports hasMore: false and no cursor when everything fits in one page', async () => {
+    const { token } = await createUser();
+    await push(token, [customerChange({ updatedAt: 1000 })]);
+
+    const res = await pull(token, 0);
+
+    expect(res.body.hasMore).toBe(false);
+    expect(res.body.nextCursor).toBeUndefined();
+  });
+
+  it('caps a page and walks the cursor to deliver everything exactly once', async () => {
+    config.syncPullMaxChanges = 2;
+    const { token } = await createUser();
+    const pushed = [1000, 2000, 3000, 4000, 5000].map((updatedAt) => customerChange({ updatedAt }));
+    await push(token, pushed);
+
+    const pages = await pullAllPages(token, 0);
+
+    expect(pages.map((p) => p.changes.length)).toEqual([2, 2, 1]);
+    expect(pages.map((p) => p.hasMore)).toEqual([true, true, false]);
+    const delivered = pages.flatMap((p) => p.changes.map((c) => c.globalId));
+    expect(new Set(delivered).size).toBe(5);
+    expect(new Set(delivered)).toEqual(new Set(pushed.map((c) => c.globalId)));
+  });
+
+  it('paginates through updatedAt ties across entity types without loss or duplication', async () => {
+    config.syncPullMaxChanges = 1;
+    const { token } = await createUser();
+    const customerId = randomUUID();
+    // Everything shares one updatedAt — the shape a bulk Room migration produces.
+    const pushed = [
+      customerChange({ globalId: customerId, updatedAt: 1000 }),
+      customerChange({ updatedAt: 1000 }),
+      {
+        entityType: 'product',
+        globalId: randomUUID(),
+        updatedAt: 1000,
+        deleted: false,
+        payload: { name: 'Kopiko', category: 'Coffee', unit: 'sachet', price: 12, isActive: true },
+      },
+      {
+        entityType: 'payment',
+        globalId: randomUUID(),
+        updatedAt: 1000,
+        deleted: false,
+        payload: { customerGlobalId: customerId, amount: 100, paymentDate: 1736899200000, notes: null },
+      },
+    ];
+    await push(token, pushed);
+
+    const pages = await pullAllPages(token, 0);
+
+    const delivered = pages.flatMap((p) => p.changes.map((c) => `${c.entityType}:${c.globalId}`));
+    expect(delivered).toHaveLength(4);
+    expect(new Set(delivered)).toEqual(new Set(pushed.map((c) => `${c.entityType}:${c.globalId}`)));
+  });
+
+  it('keeps serverTime constant across the pages of one paging cycle', async () => {
+    config.syncPullMaxChanges = 1;
+    const { token } = await createUser();
+    await push(token, [customerChange({ updatedAt: 1000 }), customerChange({ updatedAt: 2000 })]);
+
+    const pages = await pullAllPages(token, 0);
+
+    expect(pages.length).toBeGreaterThan(1);
+    expect(new Set(pages.map((p) => p.serverTime)).size).toBe(1);
+  });
+
+  it('still respects since while paginating', async () => {
+    config.syncPullMaxChanges = 1;
+    const { token } = await createUser();
+    await push(token, [
+      customerChange({ updatedAt: 1000 }),
+      customerChange({ updatedAt: 2000 }),
+      customerChange({ updatedAt: 3000 }),
+    ]);
+
+    const pages = await pullAllPages(token, 1500);
+
+    const delivered = pages.flatMap((p) => p.changes.map((c) => c.updatedAt));
+    expect(delivered).toEqual([2000, 3000]);
+  });
+
+  it('rejects a malformed cursor', async () => {
+    const { token } = await createUser();
+
+    const res = await pullPage(token, 0, 'not-a-cursor');
+
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a cursor naming an unknown entity type', async () => {
+    const { token } = await createUser();
+
+    const res = await pullPage(token, 0, `1000:1000:not_an_entity:${randomUUID()}`);
+
+    expect(res.status).toBe(400);
   });
 });
 

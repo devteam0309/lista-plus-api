@@ -39,6 +39,13 @@ export const config = {
   appPackage: process.env.APP_PACKAGE ?? 'com.jorres.listaplus',
   googlePlaySaKey: process.env.GOOGLE_PLAY_SA_KEY ?? '',
 
+  // Only these SKUs unlock Premium. Any other purchased product in the package
+  // (a future consumable, a test SKU) must not grant a lifetime entitlement.
+  premiumProductIds: (process.env.PREMIUM_PRODUCT_IDS ?? 'listaplus_premium_lifetime')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+
   corsOrigins: (process.env.CORS_ORIGINS ?? '')
     .split(',')
     .map((o) => o.trim())
@@ -48,4 +55,9 @@ export const config = {
   // Growth guard, not a business limit — a real store stays far below it.
   // 0 disables the check.
   syncMaxDocsPerUser: Number(process.env.SYNC_MAX_DOCS_PER_USER ?? 200_000),
+
+  // Max changes per pull page. Bounds the memory one pull can pin (an account
+  // at the storage quota must not OOM the instance); the client follows
+  // `nextCursor` while `hasMore` is true. 0 disables paging.
+  syncPullMaxChanges: Number(process.env.SYNC_PULL_MAX_CHANGES ?? 5_000),
 };

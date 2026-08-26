@@ -2,8 +2,8 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import * as syncService from '../services/sync.service.js';
 
 export const pullChanges = asyncHandler(async (req, res) => {
-  const { since } = req.validatedQuery;
-  const result = await syncService.pull(req.userId, since);
+  const { since, cursor } = req.validatedQuery;
+  const result = await syncService.pull(req.userId, since, cursor ?? null);
   res.json(result);
 });
 

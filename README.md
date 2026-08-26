@@ -40,8 +40,10 @@ curl http://localhost:3000/api/v1/health
 | `GOOGLE_CLIENT_ID` | **yes** | The **Web** OAuth client ID — must equal the `requestIdToken(...)` server client ID in the Android app, or every sign-in 401s. |
 | `APP_PACKAGE` | no | Default `com.jorres.listaplus`. |
 | `GOOGLE_PLAY_SA_KEY` | for billing | Service-account key: an absolute path to the JSON file, or the raw JSON itself. Needs *View financial data* on the Play Console app. |
+| `PREMIUM_PRODUCT_IDS` | no | Comma-separated Play SKUs that unlock Premium. Default `listaplus_premium_lifetime`. Any other product — even a genuinely purchased one — is refused with `PURCHASE_INVALID`. |
 | `CORS_ORIGINS` | no | Comma-separated browser allowlist for the future web dashboard. The Android app is not a browser and is unaffected. |
 | `SYNC_MAX_DOCS_PER_USER` | no | Storage quota per account, summed across entity types. Default `200000`; `0` disables. |
+| `SYNC_PULL_MAX_CHANGES` | no | Max changes per pull page (see [pull](#get-syncpullsinceepochmillis)). Default `5000`; `0` disables paging. |
 
 ---
 
@@ -134,7 +136,7 @@ Stateless — the client discards the token. Returns `{ "success": true }`. To s
 
 ### `POST /billing/verify`
 
-Verifies a Play purchase and unlocks Premium. Requires auth but **not** premium — this is what grants it.
+Verifies a Play purchase and unlocks Premium. Requires auth but **not** premium — this is what grants it. `productId` must be one of `PREMIUM_PRODUCT_IDS`; any other SKU is refused with `400 PURCHASE_INVALID` before Google Play is even asked.
 
 ```jsonc
 // request
@@ -146,11 +148,12 @@ Verifies a Play purchase and unlocks Premium. Requires auth but **not** premium 
 
 ### `GET /sync/pull?since=<epochMillis>`
 
-Returns every change for the authenticated user with `updatedAt > since`, across all entity types, tombstones included. `since=0` (or omitted) is a full sync.
+Returns the changes for the authenticated user with `updatedAt > since`, across all entity types, tombstones included. `since=0` (or omitted) is a full sync.
 
 ```jsonc
 {
   "serverTime": 1736899200000,
+  "hasMore": false,                // true → repeat the request with cursor=nextCursor
   "changes": [
     { "entityType": "customer", "globalId": "3f1a...", "updatedAt": 1736899100000,
       "deleted": false, "payload": { "fullName": "Aling Nena", "creditLimit": 1500, ... } },
@@ -160,7 +163,9 @@ Returns every change for the authenticated user with `updatedAt > since`, across
 }
 ```
 
-Changes are sorted by `updatedAt` ascending across all types. Store `serverTime` and pass it as the next `since`.
+Changes are sorted ascending by `(updatedAt, entityType, globalId)` — the tiebreakers make the order total, which is what allows paging through rows that share one `updatedAt` (a bulk migration stamps thousands of rows with the same millisecond).
+
+**Paging.** A response never carries more than `SYNC_PULL_MAX_CHANGES` changes. When more remain, the response has `hasMore: true` and a `nextCursor` string; repeat the request with the **same `since`** plus `&cursor=<nextCursor>` until `hasMore` is `false`. The cursor is opaque — echo it back verbatim, never build or parse one. `serverTime` is pinned across all pages of one cycle (it rides inside the cursor), so the client rule stays simple: **when `hasMore` is `false`, store that response's `serverTime` and pass it as the next `since`.** Apply each page as it arrives — re-pulling a page is idempotent, so a cycle interrupted halfway just restarts from the stored `since`.
 
 ### `POST /sync/push`
 
@@ -224,7 +229,7 @@ The test suite runs on `mongodb-memory-server` (standalone), so it exercises the
 
 Per synced collection:
 - `{ userId: 1, globalId: 1 }` **unique** — the idempotency key, and the guard that makes the standalone push path correct.
-- `{ userId: 1, updatedAt: 1 }` — serves `pull?since=`.
+- `{ userId: 1, updatedAt: 1, globalId: 1 }` — serves `pull?since=`; `globalId` lets a page cursor resume inside a run of identical `updatedAt` values without a scan. (Deployments created before pagination carry the old `{ userId, updatedAt }` index — harmless, but drop it to save write cost.)
 
 ### Money
 
@@ -234,7 +239,7 @@ Peso amounts are stored as **Decimal128**, not JS floats: a ledger adds and subt
 
 Worth knowing before this meets real traffic:
 
-- **Pull is unpaginated** by design — the contract has no cursor, and truncating a response would silently corrupt a ledger (the client would advance `since` past data it never received). A store with years of history does one large first sync. If this becomes a problem, add pagination as a *contract change* on both sides, not a server-side cap.
+- **Pull pages at `SYNC_PULL_MAX_CHANGES` changes** so an account at the storage quota cannot pin hundreds of MB of heap in one response. The cursor resumes on the `(updatedAt, entityType, globalId)` total order — a plain `updatedAt` watermark would skip or livelock on rows sharing one timestamp. Truncation without a cursor was rejected on purpose: the client would advance `since` past data it never received.
 - **`updatedAt` is the device's clock.** A phone with a badly wrong clock can write a change whose `updatedAt` is in the past and lose to the server copy forever. The future direction is bounded server-side: any `updatedAt` more than 24 h ahead of server time is **clamped** to `serverTime + 24h` on push, so a broken clock can no longer produce a row that nothing can ever overwrite. `serverTime` is sampled *before* the pull query so concurrent writes are re-delivered rather than missed. A clamped device's local copy keeps its original (higher) `updatedAt`, so that one device may skip pulled edits until its clock is fixed — the server and all other devices stay consistent.
 - **Conflicts resolve per entity, not per field.** Two devices editing different fields of the same customer means the later write wins wholesale. Fine for one owner with one phone; revisit if multi-staff editing ships.
 
@@ -246,7 +251,8 @@ Worth knowing before this meets real traffic:
 - Google ID tokens are verified with `audience` pinned to `GOOGLE_CLIENT_ID`.
 - A purchase token is bound to one account; replaying it on a second account is a `409`.
 - `helmet`, a CORS allowlist, and per-route rate limits are on by default. Authorization headers, `idToken`, and `purchaseToken` are redacted from logs.
-- Bodies are capped at 5 MB; batches at 1000 changes; accounts at `SYNC_MAX_DOCS_PER_USER` synced documents (a growth guard — the check is a soft cap enforced at push time).
+- Bodies are capped at 5 MB; batches at 1000 changes; pull pages at `SYNC_PULL_MAX_CHANGES` changes; accounts at `SYNC_MAX_DOCS_PER_USER` synced documents (a growth guard — the check is a soft cap enforced at push time).
+- Only the SKUs in `PREMIUM_PRODUCT_IDS` can unlock Premium — a purchased token for any other product in the package is refused.
 - API tokens are verified with the algorithm pinned to HS256.
 - Terminate TLS in front of this service in production (nginx/Render/Fly). `trust proxy` is enabled so `req.ip` reflects the real client.
 
@@ -280,8 +286,8 @@ npm test
 |---|---|
 | `auth.test.js` | Valid/invalid/expired ID token, unverified email, idempotent upsert, profile refresh, premium preserved across re-auth, Bearer rejection, deleted-account token |
 | `sync.push.test.js` | Insert, newer-wins, older-loses, equal-skips, tombstone applied, stale tombstone loses, tombstone-before-insert, mixed batch, batch-level validation rejection, UUID-vs-Room-int guard, Decimal128 storage, auth + premium gate |
-| `sync.pull.test.js` | `since` filtering, full sync, ordering across entity types, payload round-trip, tombstones surfaced, per-user isolation, forged `userId` ignored |
-| `billing.test.js` | Purchase unlocks premium and sync, acknowledgement flow, refunded/pending/consumed refused, unknown token, Play outage → 502, token replay → 409, idempotency |
+| `sync.pull.test.js` | `since` filtering, full sync, ordering across entity types, payload round-trip, tombstones surfaced, pagination (cursor walk, `updatedAt` ties, pinned `serverTime`, malformed cursor), per-user isolation, forged `userId` ignored |
+| `billing.test.js` | Purchase unlocks premium and sync, acknowledgement flow, refunded/pending/consumed refused, non-premium SKU refused, unknown token, Play outage → 502, token replay → 409, idempotency |
 | `health.test.js` | Health shape, 404 envelope |
 
 ---
@@ -300,7 +306,7 @@ The app keys entities on Room auto-increment ints, which are local and collide a
 Every synced table needs `updatedAt: Long` (epoch millis, set on every write) and an `isDirty: Boolean` flag. Push sends dirty rows; clear the flag only after a `2xx`. Deletes become soft deletes (`deleted = true`, bump `updatedAt`, mark dirty) — a hard delete can't propagate.
 
 **4. Store `since` and the JWT.**
-Persist the `serverTime` from each successful pull (DataStore/SharedPreferences) and send it as the next `since`. Store the JWT in `EncryptedSharedPreferences` — **not** plain SharedPreferences; it is a bearer credential for the store's entire ledger. On `401`, silently re-run Google Sign-In, POST the fresh ID token to `/auth/google`, and retry once.
+Pull in a loop: while a response has `hasMore: true`, repeat with the same `since` plus `cursor=<nextCursor>` (opaque — echo it verbatim). When `hasMore` is `false`, persist that response's `serverTime` (DataStore/SharedPreferences) and send it as the next `since`. Apply each page as it arrives; an interrupted cycle just restarts from the stored `since`. Store the JWT in `EncryptedSharedPreferences` — **not** plain SharedPreferences; it is a bearer credential for the store's entire ledger. On `401`, silently re-run Google Sign-In, POST the fresh ID token to `/auth/google`, and retry once.
 
 **5. Wire `GOOGLE_CLIENT_ID` to the Web client ID.**
 The app's `requestIdToken(...)` must pass the **Web** OAuth client ID (not the Android one), and it must be the same value as the server's `GOOGLE_CLIENT_ID`. A mismatch fails every sign-in with a `401` that looks like a server bug.

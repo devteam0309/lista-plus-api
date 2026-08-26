@@ -108,6 +108,18 @@ describe('POST /api/v1/billing/verify', () => {
     expect((await User.findById(user._id)).premium).toBe(false);
   });
 
+  it('refuses a product that is not the premium SKU, without calling Play', async () => {
+    const { token, user } = await createUser({ premium: false });
+    productsGet.mockResolvedValue(playResponse());
+
+    const res = await verify(token, { productId: 'some_cheap_consumable', purchaseToken: 'purchase-token-abc' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('PURCHASE_INVALID');
+    expect(productsGet).not.toHaveBeenCalled();
+    expect((await User.findById(user._id)).premium).toBe(false);
+  });
+
   it('handles a token Play does not recognise', async () => {
     const { token } = await createUser({ premium: false });
     const err = new Error('Not Found');

@@ -38,7 +38,13 @@ services:
 
       - key: APP_PACKAGE
         value: com.jorres.listaplus
+      # Only these SKUs unlock Premium; any other purchased product is refused.
+      - key: PREMIUM_PRODUCT_IDS
+        value: listaplus_premium_lifetime
       - key: LOG_LEVEL
         value: info
       - key: SYNC_MAX_DOCS_PER_USER
         value: "200000"
+      # Pull page size — bounds the heap one pull can pin on the 512 MB instance.
+      - key: SYNC_PULL_MAX_CHANGES
+        value: "5000"

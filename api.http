@@ -252,11 +252,16 @@ Content-Type: application/json
 # 4. Pull — download remote changes
 ###############################################################################
 
-### Full sync (fresh install / restore). Store the returned serverTime locally.
+### Full sync (fresh install / restore). If hasMore is true, repeat with
+### cursor={{nextCursor}} until it is false, THEN store that serverTime locally.
 GET {{baseUrl}}/sync/pull?since=0
 Authorization: Bearer {{token}}
 
-### Delta sync — pass the serverTime from the previous pull.
+### Next page of a paged pull — same since, plus the nextCursor echoed verbatim.
+GET {{baseUrl}}/sync/pull?since=0&cursor=PASTE_NEXT_CURSOR_FROM_PREVIOUS_RESPONSE
+Authorization: Bearer {{token}}
+
+### Delta sync — pass the serverTime from the previous completed pull cycle.
 GET {{baseUrl}}/sync/pull?since=1736899250000
 Authorization: Bearer {{token}}
 

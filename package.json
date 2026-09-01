@@ -11,7 +11,8 @@
     "dev:memdb": "node scripts/dev-memory-db.mjs",
     "start": "node src/server.js",
     "test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --runInBand",
-    "test:watch": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --runInBand --watch"
+    "test:watch": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --runInBand --watch",
+    "probe:play": "node scripts/probe-play-permissions.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

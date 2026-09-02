@@ -27,6 +27,41 @@ function buildAuth() {
   return new google.auth.GoogleAuth({ keyFile: raw, scopes: SCOPES });
 }
 
+let credentialSummary = null;
+
+/**
+ * A non-secret description of the configured service account, for `/health`.
+ *
+ * Nothing else reveals which key a deployment is actually using: a wrong-but-
+ * valid key authenticates fine and only fails when Play is called, which means
+ * it surfaces as a 502 during a real customer's purchase. This makes a bad
+ * deploy visible immediately instead.
+ *
+ * Reports only the local part of `client_email` — enough to tell one service
+ * account from another, and useless without the private key it belongs to.
+ * Never returns any part of the credential itself.
+ */
+export function describeCredentials() {
+  if (credentialSummary) return credentialSummary;
+
+  const raw = config.googlePlaySaKey?.trim();
+  if (!raw) {
+    credentialSummary = { configured: false };
+    return credentialSummary;
+  }
+
+  try {
+    const json = raw.startsWith('{') ? raw : fs.readFileSync(raw, 'utf8');
+    const email = JSON.parse(json).client_email ?? '';
+    credentialSummary = { configured: true, account: email.split('@')[0] || null };
+  } catch {
+    // A malformed key must not take the health endpoint down with it — that is
+    // precisely the moment its state needs to be reportable.
+    credentialSummary = { configured: false, error: 'unreadable' };
+  }
+  return credentialSummary;
+}
+
 function getPublisher() {
   if (!publisherPromise) {
     publisherPromise = (async () => google.androidpublisher({ version: 'v3', auth: buildAuth() }))().catch(

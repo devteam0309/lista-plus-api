@@ -39,11 +39,103 @@ curl http://localhost:3000/api/v1/health
 | `JWT_EXPIRES_IN` | no | Default `30d`. |
 | `GOOGLE_CLIENT_ID` | **yes** | The **Web** OAuth client ID — must equal the `requestIdToken(...)` server client ID in the Android app, or every sign-in 401s. |
 | `APP_PACKAGE` | no | Default `com.jorres.listaplus`. |
-| `GOOGLE_PLAY_SA_KEY` | for billing | Service-account key: an absolute path to the JSON file, or the raw JSON itself. Needs *View financial data* on the Play Console app. |
+| `GOOGLE_PLAY_SA_KEY` | for billing | Service-account key: an absolute path to the JSON file, or the raw JSON itself. Getting the permissions right is fiddly — see [Play Billing setup](#play-billing-setup). |
 | `PREMIUM_PRODUCT_IDS` | no | Comma-separated Play SKUs that unlock Premium. Default `listaplus_premium_lifetime`. Any other product — even a genuinely purchased one — is refused with `PURCHASE_INVALID`. |
 | `CORS_ORIGINS` | no | Comma-separated browser allowlist for the future web dashboard. The Android app is not a browser and is unaffected. |
 | `SYNC_MAX_DOCS_PER_USER` | no | Storage quota per account, summed across entity types. Default `200000`; `0` disables. |
 | `SYNC_PULL_MAX_CHANGES` | no | Max changes per pull page (see [pull](#get-syncpullsinceepochmillis)). Default `5000`; `0` disables paging. |
+
+---
+
+## Play Billing setup
+
+`POST /billing/verify` asks Google Play whether a purchase token is real. That call is
+made by a **service account**, and it needs one specific Play permission that is easy to
+miss. Until it is granted, every verification fails and no purchase can ever unlock
+Premium.
+
+### 1. Create the service account
+
+In the **Google Cloud Console**, in any project:
+
+1. Enable the **Google Play Android Developer API** (APIs & Services → Library).
+2. Create a service account (IAM & Admin → Service Accounts).
+3. **Keys → Add key → Create new key → JSON.** That downloaded file is the credential.
+
+**Do not bother assigning Cloud IAM roles** such as Editor or Owner. They govern Cloud
+resources and grant no Play access whatsoever — a popular piece of bad advice that sends
+people in circles. Play permissions are granted entirely in the Play Console.
+
+### 2. Grant it access in the Play Console
+
+Play Console **removed the old "Setup → API access" page**, and with it the notion of a
+linked Cloud project. A service account from *any* project is now granted by email:
+
+1. From the Play Console home (not inside the app) → **Users and permissions**.
+2. **Invite new users** → paste the service account email
+   (`…@….iam.gserviceaccount.com`).
+3. Grant it access to the app, **and** on the **Account permissions** tab tick:
+
+   > **View financial data, orders, and cancellation survey responses**
+
+4. **Send the invitation.** Configuring the boxes without saving is the most common way
+   this silently fails.
+
+> 🔴 **The financial-data permission is on the _Account permissions_ tab, not App
+> permissions.** Under App permissions you will only find *Admin (all permissions)* and
+> *View app information (read-only)* — and that second one explicitly excludes financial
+> data, which is exactly what `purchases.products.get` needs. App access alone is not
+> enough: the products API will answer `200` while purchase verification still `401`s.
+
+Changes usually apply within minutes; Google allows up to 24 hours.
+
+### 3. Set it on the server
+
+Put the **raw JSON** in `GOOGLE_PLAY_SA_KEY` — a host like Render has nowhere to keep a
+key file. `playBilling.service.js` branches on whether the value starts with `{`, so the
+same variable accepts a file path locally. The value is trimmed, so a pretty-printed
+multi-line paste is fine.
+
+`APP_PACKAGE` and `PREMIUM_PRODUCT_IDS` both default correctly for this app, so
+`GOOGLE_PLAY_SA_KEY` is the only variable billing actually requires.
+
+### Verifying it without a purchase
+
+```bash
+npm run probe:play                                  # uses GOOGLE_PLAY_SA_KEY
+node scripts/probe-play-permissions.mjs ./key.json  # or an explicit key
+```
+
+The script asks Play about a purchase token that cannot exist. **Being told the _token_ is
+bad proves the _call_ was authorised** — Play answers `400`/`404`/`410` for a bad token
+(the same codes `playBilling.service.js` treats as "token not recognised") and
+`401`/`403` when the service account lacks permission, before it ever looks at the token.
+A second call to the products API separates the two failure modes, which are fixed in
+different places:
+
+| `products` | `purchases` | Meaning |
+|---|---|---|
+| 401 / 403 | 401 / 403 | Not invited, or the invitation never saved |
+| **200** | 401 / 403 | App access granted, **financial-data permission missing** |
+| **200** | **400 / 404 / 410** | Fully configured |
+
+Exit codes: `0` configured, `1` permissions missing, `2` no key supplied. It is read-only
+and prints status codes only — never the credential.
+
+### Diagnosing a failed verification
+
+| Response from `/billing/verify` | Cause |
+|---|---|
+| `503 BILLING_UNAVAILABLE` | `GOOGLE_PLAY_SA_KEY` missing or empty |
+| `500` | the key is malformed JSON |
+| `502 BILLING_UPSTREAM_ERROR` | Play unreachable, or the permission above is missing |
+| `400 PURCHASE_INVALID` | SKU not in `PREMIUM_PRODUCT_IDS`, or the purchase is refunded / pending / consumed |
+| `409 PURCHASE_ALREADY_CLAIMED` | that token already unlocked a different account |
+| `200 {premium, premiumSince}` | success |
+
+Billing only returns real data in a build **distributed through Play**, so an end-to-end
+purchase needs an internal or closed testing track plus a license tester. It cannot be
+exercised from a sideloaded APK.
 
 ---
 
